@@ -1,0 +1,365 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>stepfun2api console</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #0f1115; --panel: #171a21; --edge: #262a33;
+    --text: #e6e8ec; --muted: #8b93a3; --accent: #5b8cff;
+    --ok: #35b37e; --warn: #d9a13b; --bad: #e0566b;
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg: #f6f7f9; --panel: #ffffff; --edge: #e3e6eb;
+      --text: #1a1d23; --muted: #6b7280; --accent: #2f6bff;
+      --ok: #1c8a5c; --warn: #a97a12; --bad: #c93a4f;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.55 -apple-system, "PingFang SC", "Microsoft YaHei", system-ui, sans-serif; }
+  header { display: flex; align-items: center; gap: 12px; padding: 12px 20px;
+    border-bottom: 1px solid var(--edge); position: sticky; top: 0;
+    background: var(--panel); z-index: 5; }
+  header h1 { font-size: 15px; margin: 0; font-weight: 600; letter-spacing: .02em; }
+  header .spacer { flex: 1; }
+  nav { display: flex; gap: 4px; flex-wrap: wrap; }
+  nav button { background: none; border: 1px solid transparent; color: var(--muted);
+    padding: 5px 11px; border-radius: 7px; cursor: pointer; font: inherit; }
+  nav button[aria-selected="true"] { color: var(--text); border-color: var(--edge); background: var(--bg); }
+  main { padding: 20px; max-width: 1180px; margin: 0 auto; }
+  section[hidden] { display: none; }
+  .panel { background: var(--panel); border: 1px solid var(--edge);
+    border-radius: 12px; padding: 16px; margin-bottom: 16px; }
+  .panel h2 { margin: 0 0 12px; font-size: 13px; font-weight: 600; color: var(--muted);
+    text-transform: uppercase; letter-spacing: .06em; display: flex; align-items: center; gap: 10px; }
+  .panel h2 .right { margin-left: auto; display: flex; gap: 8px; align-items: center; }
+  .grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); }
+  .stat { background: var(--bg); border: 1px solid var(--edge); border-radius: 9px; padding: 11px 13px; }
+  .stat b { display: block; font-size: 21px; font-weight: 650; }
+  .stat b.ok { color: var(--ok); } .stat b.warn { color: var(--warn); } .stat b.bad { color: var(--bad); }
+  .stat span { color: var(--muted); font-size: 12px; }
+  table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  th, td { text-align: left; padding: 7px 9px; border-bottom: 1px solid var(--edge); font-size: 13px; }
+  th { color: var(--muted); font-weight: 500; font-size: 12px; }
+  tr:last-child td { border-bottom: 0; }
+  code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  pre { background: var(--bg); border: 1px solid var(--edge); border-radius: 8px;
+    padding: 10px 12px; overflow: auto; max-height: 480px; font-size: 12px; margin: 0; }
+  input, select { background: var(--bg); border: 1px solid var(--edge); color: var(--text);
+    border-radius: 7px; padding: 6px 9px; font: inherit; width: 100%; }
+  label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: flex-end; }
+  .row > * { flex: 1 1 130px; }
+  .row > .fixed { flex: 0 0 auto; }
+  button { background: var(--accent); border: 0; color: #fff; border-radius: 7px;
+    padding: 7px 13px; cursor: pointer; font: inherit; white-space: nowrap; }
+  button.ghost { background: none; border: 1px solid var(--edge); color: var(--text); }
+  button.small { padding: 3px 8px; font-size: 12px; }
+  button[disabled] { opacity: .5; cursor: not-allowed; }
+  .pill { display: inline-block; padding: 1px 8px; border-radius: 99px; font-size: 11px;
+    border: 1px solid var(--edge); color: var(--muted); }
+  .pill.ok { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 45%, transparent); }
+  .pill.warn { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 45%, transparent); }
+  .pill.bad { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 45%, transparent); }
+  .pill.tool { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, transparent); }
+  .muted { color: var(--muted); }
+  .tiny { font-size: 11px; }
+  .mono { font-family: ui-monospace, monospace; font-size: 12px; }
+  .meter { height: 10px; background: var(--bg); border: 1px solid var(--edge);
+    border-radius: 99px; overflow: hidden; }
+  .meter i { display: block; height: 100%; background: var(--ok); transition: width .4s; }
+  .meter.low i { background: var(--warn); } .meter.bad i { background: var(--bad); }
+  .bar { display: flex; align-items: center; gap: 10px; margin: 7px 0; }
+  .bar .name { width: 170px; flex: 0 0 auto; }
+  .bar .name span { display: block; }
+  .bar .meter { flex: 1; }
+  .bar .pct { width: 56px; flex: 0 0 auto; text-align: right; font-size: 12px; }
+  .bar .reset { flex: 0 0 auto; }
+  .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media (max-width: 860px) { .cols { grid-template-columns: 1fr; } }
+  .flash { position: fixed; left: 50%; bottom: 26px; transform: translateX(-50%);
+    background: var(--panel); border: 1px solid var(--edge); border-radius: 9px;
+    padding: 9px 15px; box-shadow: 0 8px 30px rgb(0 0 0 / .28); z-index: 20; display: none; }
+  .flash.bad { border-color: var(--bad); } .flash.ok { border-color: var(--ok); }
+  .lvW { color: var(--warn); } .lvE { color: var(--bad); }
+</style>
+</head>
+<body>
+<header>
+  <h1>stepfun2api</h1>
+  <nav id="nav">
+    <button data-view="overview" aria-selected="true">总览</button>
+    <button data-view="account">账号与额度</button>
+    <button data-view="convs">会话</button>
+    <button data-view="logs">日志</button>
+  </nav>
+  <span class="spacer"></span>
+  <span id="conn" class="pill">连接中…</span>
+</header>
+
+<main>
+  <!-- ======================= 总览 ======================= -->
+  <section id="view-overview">
+    <div class="panel">
+      <h2>运行指标 <span class="right"><span id="uptime" class="pill"></span></span></h2>
+      <div class="grid" id="stats"></div>
+    </div>
+    <div class="cols">
+      <div class="panel">
+        <h2>模型分布</h2>
+        <div id="models" class="muted">—</div>
+      </div>
+      <div class="panel">
+        <h2>工具协议健康度</h2>
+        <div id="health" class="muted">—</div>
+      </div>
+    </div>
+    <div class="panel">
+      <h2>最近请求 <span class="right muted tiny">自动 5s</span></h2>
+      <table>
+        <thead><tr><th>时间</th><th>模型</th><th>类型</th><th>耗时</th><th>tokens</th><th>状态</th></tr></thead>
+        <tbody id="recent"><tr><td colspan="6" class="muted">加载中…</td></tr></tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ======================= 账号与额度 ======================= -->
+  <section id="view-account" hidden>
+    <div class="panel">
+      <h2>上游额度 <span class="right"><span id="quota-time" class="pill"></span>
+        <button class="ghost small" onclick="loadQuota(true)">刷新</button></span></h2>
+      <div id="quota" class="muted">加载中…</div>
+    </div>
+    <div class="panel">
+      <h2>Cookie / Access Token <span class="right"><span id="token-age" class="pill"></span>
+        <button id="btn-refresh" class="small" onclick="refreshCookie()">立即续期</button></span></h2>
+      <div class="bar" style="margin-top:0">
+        <span class="name tiny muted">剩余寿命</span>
+        <div class="meter" id="tokenmeter"><i style="width:0%"></i></div>
+        <span class="pct mono" id="tokenpct">—</span>
+      </div>
+      <p class="muted tiny" id="tokennote" style="margin:8px 0 0"></p>
+    </div>
+    <div class="panel">
+      <h2>账号信息</h2>
+      <table id="userinfo"><tr><td class="muted">加载中…</td></tr></table>
+    </div>
+  </section>
+
+  <!-- ======================= 会话 ======================= -->
+  <section id="view-convs" hidden>
+    <div class="panel">
+      <h2>账号会话（上游实时）<span class="right">
+        <button class="ghost small" onclick="loadConversations()">刷新</button></span></h2>
+      <table>
+        <thead><tr><th>ID</th><th>标题</th><th>最后消息</th></tr></thead>
+        <tbody id="convs"><tr><td colspan="3" class="muted">—</td></tr></tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ======================= 日志 ======================= -->
+  <section id="view-logs" hidden>
+    <div class="panel">
+      <h2>实时日志 <span class="right muted tiny">2s 增量</span>
+        <label class="fixed tiny" style="margin:0;display:flex;gap:6px;align-items:center">
+          <input type="checkbox" id="autolog" checked style="width:auto"> 自动滚动</label></h2>
+      <pre id="logbox"></pre>
+    </div>
+  </section>
+</main>
+
+<span id="apikeybox" style="position:fixed;left:20px;bottom:16px;display:flex;gap:8px;z-index:9">
+  <input type="password" id="apikey" placeholder="API Key" style="width:190px" class="mono">
+  <button class="ghost small" onclick="saveKey()">保存</button>
+</span>
+<div class="flash" id="flash"></div>
+
+<script>
+let key = localStorage.getItem("sf2_key") || "sk-stepfun";
+document.getElementById("apikey").value = key;
+function saveKey(){ key = document.getElementById("apikey").value.trim();
+  localStorage.setItem("sf2_key", key); notify("API Key 已保存"); tick(); loadQuota(); }
+function notify(msg, cls){ const f=document.getElementById("flash");
+  f.textContent=msg; f.style.display="block"; f.className="flash "+(cls||"");
+  clearTimeout(notify._t); notify._t=setTimeout(()=>f.style.display="none", 3000); }
+async function getJSON(url){
+  const r = await fetch(url, {headers:{"Authorization":"Bearer "+key}});
+  const d = await r.json().catch(()=>({}));
+  if(!r.ok) throw (d.error && d.error.message) || ("HTTP "+r.status);
+  return d;
+}
+function setConn(ok, text){ const c=document.getElementById("conn");
+  c.className="pill "+(ok?"ok":"bad"); c.textContent=text||(ok?"已连接":"断开"); }
+
+/* ---------- 视图切换 ---------- */
+const views=["overview","account","convs","logs"];
+document.getElementById("nav").addEventListener("click", e=>{
+  const b=e.target.closest("button"); if(!b) return;
+  const v=b.dataset.view;
+  views.forEach(x=>{ document.getElementById("view-"+x).hidden=(x!==v); });
+  document.querySelectorAll("nav button").forEach(n=>
+    n.setAttribute("aria-selected", n.dataset.view===v?"true":"false"));
+  if(v==="account"){ loadQuota(); }
+  if(v==="convs"){ loadConversations(); }
+});
+
+/* ---------- 总览 ---------- */
+function fmtUptime(s){ const h=Math.floor(s/3600), m=Math.floor(s%3600/60);
+  return h?h+"h "+m+"m":m+"m "+(s%60)+"s"; }
+function stat(label, val, cls){ return `<div class="stat"><b class="${cls||""}">${val}</b><span>${label}</span></div>`; }
+async function tick(){
+  try{
+    const d = await getJSON("/v1/console/overview");
+    setConn(true);
+    const m = d.metrics, tk = d.token || {};
+    document.getElementById("uptime").textContent = "uptime " + fmtUptime(d.uptime_s);
+    document.getElementById("stats").innerHTML =
+        stat("请求总数", m.requests_total)
+      + stat("流式", m.requests_stream)
+      + stat("工具模式", m.tool_mode_requests)
+      + stat("平均延迟", d.avg_latency_ms+" ms", d.avg_latency_ms>20000?"warn":"")
+      + stat("错误", m.errors, m.errors?"bad":"ok")
+      + stat("tokens in/out", (m.tokens_in/1000).toFixed(1)+"k / "+(m.tokens_out/1000).toFixed(1)+"k");
+    // 模型分布
+    const bm=m.by_model||{}, mx=Math.max(1,...Object.values(bm));
+    document.getElementById("models").innerHTML = Object.keys(bm).length
+      ? Object.entries(bm).map(([k,v])=>`<div class="bar"><span class="name mono tiny">${k}</span>
+        <div class="meter"><i style="width:${v/mx*100}%;background:var(--accent)"></i></div>
+        <span class="pct">${v}</span></div>`).join("")
+      : '<span class="muted">暂无请求</span>';
+    // 协议健康度
+    const tm=m.tool_mode_requests||0, fixed=m.retries||0, bad=(m.errors||0);
+    const rate = tm? ((tm-fixed-bad<0?0:tm-fixed-bad)/tm*100) : 100;
+    document.getElementById("health").innerHTML =
+        `<div class="bar"><span class="name tiny">一次通过率</span>
+          <div class="meter ${rate<70?(rate<40?"bad":"low"):""}"><i style="width:${rate}%"></i></div>
+          <span class="pct">${rate.toFixed(0)}%</span></div>`
+      + `<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:10px">
+          <span class="pill ${m.fabrication_hits?"warn":""}">谎报拦截 ${m.fabrication_hits}</span>
+          <span class="pill ${m.refusal_hits?"warn":""}">拒绝拦截 ${m.refusal_hits}</span>
+          <span class="pill ${m.retries?"tool":""}">纠正重试 ${m.retries}</span>
+          <span class="pill ${m.two_stage?"tool":""}">两段式搜索 ${m.two_stage}</span></div>
+         <p class="muted tiny" style="margin:10px 0 0">拦截+重试成功的问题请求，未计入失败。</p>`;
+    // token 条（全局显示在 account 视图，也回填 note）
+    const left=tk.left_min, life=tk.life_h||2;
+    const pctEl=document.getElementById("tokenpct"), meter=document.getElementById("tokenmeter");
+    if(left==null){ pctEl.textContent="—"; }
+    else{
+      const p=Math.max(0,Math.min(100,left/(life*60)*100));
+      meter.querySelector("i").style.width=p+"%";
+      meter.className="meter"+(left<=0?" bad":left<30?" low":"");
+      pctEl.textContent=left<=0?("过期"+(-left).toFixed(0)+"m"):left.toFixed(0)+"m";
+      document.getElementById("tokennote").innerHTML = left<=0
+        ? '<span style="color:var(--bad)">access token 已过期 —— 点「立即续期」或保持浏览器 stepfun 页开着</span>'
+        : `寿命 ${life.toFixed(1)}h · cookie.txt ${d.cookie_age_s}s 前更新 · 到期前 30min 自动轮换`;
+      document.getElementById("token-age").textContent = left<=0?"expired":("剩 "+left.toFixed(0)+"min");
+      document.getElementById("token-age").className="pill "+(left<=0?"bad":left<30?"warn":"ok");
+    }
+    // 最近请求
+    document.getElementById("recent").innerHTML=(d.recent||[]).map(r=>
+      `<tr><td class="mono">${r.ts}</td><td class="mono">${r.model}</td>
+       <td>${r.stream?'<span class="pill ok">SSE</span> ':""}${r.tool?'<span class="pill tool">tools</span>':''}</td>
+       <td>${r.ms} ms</td><td>${r.tok||"—"}</td>
+       <td>${r.err?'<span class="pill bad">error</span>':'<span class="pill ok">ok</span>'}</td></tr>`
+    ).join("") || '<tr><td colspan="6" class="muted">暂无</td></tr>';
+  }catch(e){ setConn(false, String(e).slice(0,40)); }
+}
+
+/* ---------- 额度 ---------- */
+function qbar(label, rate, resetMs){
+  if(rate==null) return "";
+  const p=Math.max(0,Math.min(100, rate*100));
+  const cls=p<10?"bad":p<30?"low":"";
+  let reset="";
+  if(resetMs && resetMs!=="0"){
+    reset=`<span class="reset tiny muted">${new Date(Number(resetMs)).toLocaleString("zh-CN",{month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit"})} 重置</span>`;
+  }
+  return `<div class="bar"><span class="name tiny"><span>${label}</span></span>
+    <div class="meter ${cls}"><i style="width:${p}%"></i></div>
+    <span class="pct mono">${p.toFixed(1)}%</span>${reset}</div>`;
+}
+async function loadQuota(manual){
+  try{
+    const d=await getJSON("/v1/console/quota");
+    document.getElementById("quota-time").textContent="更新于 "+new Date().toLocaleTimeString("zh-CN");
+    const q=d.quota||{};
+    let html=qbar("免费额度", q.free_rate)
+          + qbar("5 小时用量", q.five_hour_usage_left_rate, q.five_hour_usage_reset_time)
+          + qbar("周用量", q.weekly_usage_left_rate, q.weekly_usage_reset_time);
+    const cr=q.credit_rate_limit;
+    if(cr && typeof cr==="object"){
+      for(const [k,v] of Object.entries(cr))
+        if(typeof v==="number" && v<=1) html+=qbar("credit·"+k, v);
+    }
+    if(d.quota_error) html+=`<p class="tiny" style="color:var(--bad)">${d.quota_error}</p>`;
+    document.getElementById("quota").innerHTML=html;
+    // 账号信息
+    const u=d.user||{}, pl=d.plan||{};
+    document.getElementById("userinfo").innerHTML=
+      `<tr><th>UID</th><td class="mono">${u.uid||"—"}</td></tr>
+       <tr><th>Email</th><td class="mono">${u.email||"—"}</td></tr>
+       <tr><th>激活</th><td>${u.activated?'<span class="pill ok">是</span>':'<span class="pill bad">否</span>'}</td></tr>
+       <tr><th>付费模式</th><td>${u.payMode===0?"免费":"payMode "+u.payMode}</td></tr>
+       <tr><th>订阅</th><td>${pl.status===206?'<span class="pill">无（免费版）</span>':`<span class="pill ok">${pl.desc||"有效"}</span>`}</td></tr>`;
+    if(manual) notify("额度已刷新","ok");
+  }catch(e){
+    document.getElementById("quota").innerHTML=`<span style="color:var(--bad)">获取失败：${e}</span>`;
+  }
+}
+
+/* ---------- 会话 ---------- */
+async function loadConversations(){
+  const tb=document.getElementById("convs");
+  tb.innerHTML='<tr><td colspan="3" class="muted">加载中…</td></tr>';
+  try{
+    const d=await getJSON("/v1/console/conversations");
+    tb.innerHTML=d.conversations.map(c=>
+      `<tr><td class="mono">${c.id}</td><td>${c.title||""}</td>
+       <td class="mono tiny">${c.last_message_at?new Date(Number(c.last_message_at)).toLocaleString("zh-CN"):""}</td></tr>`
+    ).join("") || '<tr><td colspan="3" class="muted">无会话</td></tr>';
+  }catch(e){ tb.innerHTML=`<tr><td colspan="3" style="color:var(--bad)">${e}</td></tr>`; }
+}
+
+/* ---------- 日志 ---------- */
+let lastLogId=0;
+async function tickLogs(){
+  try{
+    const d=await getJSON(`/v1/console/logs?since=${lastLogId}&limit=200`);
+    if(!d.logs.length) return;
+    const box=document.getElementById("logbox");
+    for(const l of d.logs){
+      lastLogId=Math.max(lastLogId,l.id);
+      const cls=l.level==="WARNING"?"lvW":(l.level==="ERROR"||l.level==="CRITICAL")?"lvE":"";
+      const div=document.createElement("div");
+      div.className=cls;
+      div.textContent=`${l.ts} [${l.level}] ${l.msg}`;
+      box.appendChild(div);
+    }
+    while(box.children.length>500) box.removeChild(box.firstChild);
+    if(document.getElementById("autolog").checked) box.scrollTop=box.scrollHeight;
+  }catch(e){ /* 静默，断线由 conn pill 提示 */ }
+}
+
+/* ---------- 续期 ---------- */
+async function refreshCookie(){
+  const b=document.getElementById("btn-refresh"); b.disabled=true; b.textContent="续期中…";
+  try{
+    const r=await fetch("/v1/console/refresh-cookie",{method:"POST",headers:{"Authorization":"Bearer "+key}});
+    const d=await r.json();
+    if(d.ok && d.token && d.token.left_min>0) notify("续期成功，剩余 "+Math.round(d.token.left_min)+"min","ok");
+    else notify((d.stderr||d.stdout||d.error||"续期失败").slice(-120),"bad");
+  }catch(e){ notify("续期失败: "+e,"bad"); }
+  b.disabled=false; b.textContent="立即续期";
+  tick();
+}
+
+tick(); loadQuota(); setInterval(tick,5000); setInterval(loadQuota,60000);
+setInterval(tickLogs,2000);
+</script>
+</body>
+</html>

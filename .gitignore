@@ -1,0 +1,6 @@
+config.json
+cookie.txt
+cookie.txt.bak
+*.log
+__pycache__/
+.DS_Store

@@ -1,0 +1,5 @@
+fastapi>=0.110
+uvicorn>=0.27
+httpx>=0.27
+# 自动续期脚本 refresh_cookie.py 需要（从 Chrome CDP 抓 cookie）
+websocket-client>=1.6

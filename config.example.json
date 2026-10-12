@@ -1,0 +1,18 @@
+{
+  "host": "0.0.0.0",
+  "port": 8390,
+  "api_keys": ["sk-stepfun"],
+  "cookie_file": "cookie.txt",
+  "proxy": null,
+  "language": "en",
+  "default_model": "step-5-preview",
+  "log_requests": true,
+  "auto_delete_conversation": true,
+  "request_timeout": 300,
+  "default_temperature": 1.0,
+  "default_top_p": 0.95,
+  "default_max_tokens": 8000,
+  "default_thinking": true,
+  "default_effort": "medium",
+  "tool_max_retries": 2
+}
