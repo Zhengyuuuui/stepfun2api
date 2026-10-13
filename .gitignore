@@ -1,6 +1,7 @@
 config.json
 cookie.txt
 cookie.txt.bak
+*.bak
 *.log
 __pycache__/
 .DS_Store

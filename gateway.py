@@ -834,27 +834,101 @@ async def console_conversations(request: Request):
          "last_message_at": x.get("last_message_at")} for x in items]})
 
 
-@app.post("/v1/console/refresh-cookie")
-async def console_refresh_cookie(request: Request):
+async def _run_refresh_script(*flags: str, timeout: int = 60):
     import asyncio as _a
     import subprocess as _sp
-    err = check_auth(request)
-    if err:
-        return err
     script = os.path.join(base_dir, "refresh_cookie.py")
     try:
         proc = await _a.create_subprocess_exec(
-            "python3", script, cwd=base_dir,
+            "python3", script, *flags, cwd=base_dir,
             stdout=_sp.PIPE, stderr=_sp.PIPE)
-        out, outerr = await _a.wait_for(proc.communicate(), timeout=60)
-        ok = proc.returncode == 0
-        return JSONResponse({"ok": ok,
-                             "stdout": out.decode("utf-8", "replace")[-500:],
-                             "stderr": outerr.decode("utf-8", "replace")[-500:],
-                             "token": _token_status_now()},
-                            status_code=200 if ok else 502)
+        out, outerr = await _a.wait_for(proc.communicate(), timeout=timeout)
+        return proc.returncode, out.decode("utf-8", "replace").strip(), \
+            outerr.decode("utf-8", "replace").strip()
     except Exception as e:
-        return _openai_err("refresh_failed", str(e), 502)
+        return -1, "", str(e)
+
+
+@app.post("/v1/console/refresh-cookie")
+async def console_refresh_cookie(request: Request):
+    err = check_auth(request)
+    if err:
+        return err
+    before = _token_status_now()
+    rc, out, outerr = await _run_refresh_script("--force-rotate")
+    # 强刷后主动热更新（不依赖 watcher 轮询间隔）
+    try:
+        path = CONFIG.get("cookie_file") or "cookie.txt"
+        new = open(path, encoding="utf-8").read().strip()
+        if new:
+            get_client().update_cookie(new)
+            CONFIG["cookie"] = new
+    except Exception:
+        pass
+    after = _token_status_now()
+    bl, al = before.get("left_min"), after.get("left_min")
+    if rc != 0:
+        state, note = "failed", "刷新脚本执行失败（浏览器未开/未登录？）"
+    elif al is not None and bl is not None and al > bl + 1:
+        state, note = "rotated", "SPA 已换发新 token（原 token 已过期/临期）"
+    elif al is not None and al <= 0:
+        state, note = "expired", "浏览器 token 也已过期且 SPA 未换发——请在打开的 studio 页面里操作一下或重新登录"
+    else:
+        state, note = "synced", ("浏览器与 cookie.txt 已同步；当前 token 仍在有效期内，"
+                                 "上游只会在真过期瞬间换发新 token（launchd 每 60s 自动兜底）")
+    return JSONResponse({
+        "ok": rc == 0, "state": state, "note": note,
+        "before": before, "token": after,
+        "stdout": out[-500:], "stderr": outerr[-500:],
+    })
+
+
+@app.post("/v1/console/open-login")
+async def console_open_login(request: Request):
+    err = check_auth(request)
+    if err:
+        return err
+    rc, out, outerr = await _run_refresh_script("--open-login", timeout=15)
+    try:
+        data = json.loads(out or "{}")
+    except Exception:
+        data = {}
+    return JSONResponse({"ok": rc == 0 and data.get("ok", False), **data,
+                         "stderr": outerr[-300:]})
+
+
+@app.get("/v1/console/login-status")
+async def console_login_status(request: Request):
+    err = check_auth(request)
+    if err:
+        return err
+    rc, out, outerr = await _run_refresh_script("--status", timeout=15)
+    try:
+        data = json.loads(out or "{}")
+    except Exception:
+        data = {"ok": False, "error": outerr or out or "no output"}
+    return JSONResponse(data)
+
+
+@app.post("/v1/console/capture-cookie")
+async def console_capture_cookie(request: Request):
+    """登录完成后直接抓浏览器 cookie 覆盖 cookie.txt（不触发轮换）。"""
+    err = check_auth(request)
+    if err:
+        return err
+    rc, out, outerr = await _run_refresh_script("--no-rotate")
+    if rc != 0:
+        return JSONResponse({"ok": False, "stdout": out[-300:], "stderr": outerr[-300:]},
+                            status_code=502)
+    try:
+        path = CONFIG.get("cookie_file") or "cookie.txt"
+        new = open(path, encoding="utf-8").read().strip()
+        if new:
+            get_client().update_cookie(new)
+            CONFIG["cookie"] = new
+    except Exception:
+        pass
+    return JSONResponse({"ok": True, "token": _token_status_now(), "stdout": out[-300:]})
 
 
 if __name__ == "__main__":

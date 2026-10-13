@@ -96,13 +96,89 @@ def token_status(oasis_token: str):
     return left_min, life_h, exp < now
 
 
+def cdp_targets(port: int):
+    return json.load(urllib.request.urlopen(f"http://127.0.0.1:{port}/json/list", timeout=5))
+
+
+def status_mode(port: int):
+    """机器可读状态：CDP/页面/登录/token 剩余。不写文件、不轮换。"""
+    out = {"ok": False, "cdp": False, "page": False, "logged_in": False,
+           "left_min": None, "expired": None, "error": None}
+    try:
+        data = cdp_targets(port)
+        out["cdp"] = True
+    except Exception as e:
+        out["error"] = f"CDP 不可用(127.0.0.1:{port}): Chrome 需以 --remote-debugging-port={port} 启动"
+        print(json.dumps(out, ensure_ascii=False))
+        return
+    pages = [t for t in data if t.get("type") == "page" and TARGET_HOST in t.get("url", "")]
+    if not pages:
+        out["error"] = f"调试 Chrome 里没有 {TARGET_HOST} 页面，请先打开登录页"
+        print(json.dumps(out, ensure_ascii=False))
+        return
+    out["page"] = True
+    try:
+        cks = get_cookies(pages[0]["webSocketDebuggerUrl"])
+    except Exception as e:
+        out["error"] = f"取 cookie 失败: {e}"
+        print(json.dumps(out, ensure_ascii=False))
+        return
+    if "Oasis-Token" in cks:
+        left, _, ex = token_status(cks["Oasis-Token"])
+        out.update(ok=True, logged_in=True, expired=ex,
+                   left_min=round(left, 1) if left is not None else None)
+    else:
+        out["error"] = "浏览器未登录（无 Oasis-Token），请完成登录"
+    print(json.dumps(out, ensure_ascii=False))
+
+
+def open_login_mode(port: int, url: str = "https://studio.stepfun.ai/"):
+    """在调试 Chrome 里打开/聚焦 studio 页面，供用户登录。"""
+    out = {"ok": False, "opened": False, "already": False, "error": None}
+    try:
+        data = cdp_targets(port)
+    except Exception as e:
+        out["error"] = f"CDP 不可用: {e}（Chrome 需以调试模式启动）"
+        print(json.dumps(out, ensure_ascii=False))
+        return
+    pages = [t for t in data if t.get("type") == "page" and TARGET_HOST in t.get("url", "")]
+    try:
+        if pages:
+            ws = websocket.create_connection(pages[0]["webSocketDebuggerUrl"], timeout=10)
+            ws.send(json.dumps({"id": 1, "method": "Page.navigate", "params": {"url": url}}))
+            ws.recv()
+            ws.close()
+            out.update(ok=True, already=True)
+        else:
+            v = json.load(urllib.request.urlopen(f"http://127.0.0.1:{port}/json/version", timeout=5))
+            ws = websocket.create_connection(v["webSocketDebuggerUrl"], timeout=10)
+            ws.send(json.dumps({"id": 1, "method": "Target.createTarget", "params": {"url": url}}))
+            r = json.loads(ws.recv())
+            ws.close()
+            out.update(ok=True, opened=True, targetId=r.get("result", {}).get("targetId"))
+    except Exception as e:
+        out["error"] = str(e)
+    print(json.dumps(out, ensure_ascii=False))
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=int(os.environ.get("CDP_PORT", DEFAULT_CDP_PORT)))
     ap.add_argument("--out", default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "cookie.txt"))
     ap.add_argument("--check", action="store_true", help="只检查寿命，不写文件")
     ap.add_argument("--no-rotate", action="store_true", help="token 过期时不触发页面 reload 轮换")
+    ap.add_argument("--force-rotate", action="store_true",
+                    help="无条件触发页面 reload 轮换（Console「立即续期」按钮用）")
+    ap.add_argument("--status", action="store_true", help="输出 JSON 状态（CDP/登录/token），不写文件")
+    ap.add_argument("--open-login", action="store_true", help="在调试 Chrome 打开/聚焦 studio 登录页")
     args = ap.parse_args()
+
+    if args.status:
+        status_mode(args.port)
+        return
+    if args.open_login:
+        open_login_mode(args.port)
+        return
 
     try:
         page = find_page(args.port)
@@ -119,8 +195,10 @@ def main():
     hdr = "; ".join(f"{k}={v}" for k, v in cks.items())
     left, life, expired = token_status(cks["Oasis-Token"])
 
-    # 过期/临期（<30min）→ 触发页面轮换后重抓一次（SPA 只在页面加载/API调用时轮换 token）
-    if (not args.check and not args.no_rotate and left is not None and left < 30
+    # force=无条件轮换；默认=已过期才 reload（活跃页面 SPA 会在过期瞬间自动换发，
+    # launchd 高频抓取即兜底；reload 只用于救活闲置/后台页面没发请求导致没换发的情况）。
+    threshold = 1e9 if args.force_rotate else 0
+    if (not args.check and not args.no_rotate and left is not None and left < threshold
             and trigger_rotation(page["webSocketDebuggerUrl"])):
         cks2 = get_cookies(page["webSocketDebuggerUrl"])
         l2, lf2, ex2 = token_status(cks2.get("Oasis-Token", ""))
@@ -128,6 +206,9 @@ def main():
             cks, hdr, left, life, expired = cks2, "; ".join(
                 f"{k}={v}" for k, v in cks2.items()), l2, lf2, ex2
             print("[info] 已触发页面轮换，拿到新 token", file=sys.stderr)
+        else:
+            print("[info] 已 reload 但 SPA 未换发新 token（当前 token 仍有效时它可能不换）",
+                  file=sys.stderr)
 
     if args.check:
         print(json.dumps({

@@ -131,7 +131,8 @@ PORT=8391 API_KEYS=sk-a,sk-b python gateway.py
 启动后浏览器打开 `http://127.0.0.1:8390/` 即内置控制台（单文件 `static/index.html`，无外部依赖，
 明暗双主题，布局参考同作者 minimax2api console）。四个视图：
 
-- **总览**：请求数/流式/工具模式/平均延迟/错误/token 用量；模型分布；**工具协议健康度**
+- **总览**：**登录/Cookie 面板**（打开 Studio 登录页 → 登录 → 自动抓 cookie 热更新的闭环）、
+  请求数/流式/工具模式/平均延迟/错误/token 用量；模型分布；**工具协议健康度**
   （一次通过率 + 谎报拦截/拒绝拦截/纠正重试/两段式搜索计数）；最近请求表
 - **账号与额度**：上游实时额度（免费额度/5小时/周窗口进度条 + 重置时间 + credit 明细）、
   access token 剩余寿命条 + **一键续期按钮**（等效手动跑 refresh_cookie.py）、账号信息（UID/Email/订阅）
@@ -146,7 +147,16 @@ Console API（均需 `Authorization: Bearer <网关api_key>`，与 `/v1/*` 同�
 | `GET /v1/console/quota` | 上游额度/订阅计划/账号信息（`QueryStudioRateLimit` 等实测端点） |
 | `GET /v1/console/logs?since=<id>` | 日志增量（环形缓冲 300 条） |
 | `GET /v1/console/conversations` | 上游会话列表 |
-| `POST /v1/console/refresh-cookie` | 触发 `refresh_cookie.py` 续期（含浏览器轮换，约 15s） |
+| `GET /v1/console/login-status` | 调试 Chrome 状态（CDP/studio页/登录态/token 剩余，JSON） |
+| `POST /v1/console/open-login` | 在调试 Chrome 里打开/聚焦 studio 登录页 |
+| `POST /v1/console/capture-cookie` | 从浏览器抓取 cookie 覆盖 cookie.txt 并热更新（登录闭环用） |
+| `POST /v1/console/refresh-cookie` | **强制**轮换续期（reload 页面换发新 token 后覆盖 cookie.txt） |
+
+> **登录即拿 cookie**：总览页「打开 Studio 登录页」→ 浏览器里正常登录 → 控制台每 2s 轮询，
+> 检测到有效 token 后自动抓取 cookie.txt 并热更新网关，全程不用打开 DevTools 抄 cookie。
+> 前提：Chrome 以 `--remote-debugging-port=9366` 启动（refresh token 约 30 天有效，期间可随时重抓）。
+> 注意：上游 SPA 只在 token 过期/临期时才换发新 access token，「立即续期」对有效期内
+> 的 token 会如实提示"已替换 cookie 但 SPA 未换发"。
 
 ---
 
@@ -295,26 +305,35 @@ print(r.choices[0].message.content)
 
 ## 自动续期（Token 每 2h 过期）
 
-上游 `Oasis-Token` 由两段 JWT 组成（`access...refresh`）：
+上游 `Oasis-Token` 由两段 JWT 组成（`access...refresh`，以 `...` 连接）：
 - **access token：寿命 2 小时**（网关实际鉴权用的就是它，过期 → 401 `token is expired`）
-- **refresh token：寿命约 30 天**（浏览器用它自动轮换 access token）
+- **refresh token：寿命约 30 天**（浏览器用它在过期时自动轮换 access token）
 
 所以只要**本机 Chrome 保持登录 studio.stepfun.ai**，就可以定期从浏览器把最新 cookie 同步过来。
 本网关实现了全自动续期闭环：
 
 ```
-launchd 每5分钟 → refresh_cookie.py（CDP 抓最新 cookie → 写 cookie.txt）
+launchd 每 60 秒 → refresh_cookie.py（CDP 检查/抓最新 cookie → 写 cookie.txt）
                                     ↓
 网关 cookie watcher（每5s 轮询 mtime）→ 内容变化 → 热更新 client（免重启）
 ```
+
+### 关键机制与实测结论（为什么无法提前续期）
+
+实测 StepFun 海外版 SPA 的换发行为有极其特殊的强约束，切勿盲目"提前续期"：
+1. **无法提前续期**：SPA **仅在服务端返回 401 token-expired 时**，才会使用 refresh 段向上游换发同账号的新 access token（2h）；在 token 仍处于有效期内时，无论如何 reload 页面，SPA 都绝对不会换发新 token。
+2. **伪造过期会换错账号**：如果通过本地修改时间戳等方式伪造 access token 过期（无论保留还是丢弃 refresh 段），都会导致上游签名校验失败。SPA 遭遇非法 token 时会直接清空 cookie 并触发游客重注册，生成一个**无额度、未激活（`activated=false`, `payMode=1`）的全新游客 UID**，导致原账号额度丢失不可用！
+3. **闭环策略**：因此，协议层在有效期内不可能提前续期。网关采用最佳稳妥设计：
+   - **真过期兜底**：launchd 定时任务每 60 秒检查一次，一旦真过期便触发页面 reload 换发新 token 并同步写入 `cookie.txt`。
+   - **保持浏览器活跃**：用户日常保持调试 Chrome 打开 `studio.stepfun.ai` 标签页，SPA 在过期后发请求会自然换发，网关可在 60 秒内无缝跟进热更新。
 
 ### 组成
 
 | 部件 | 说明 |
 | -- | -- |
-| `refresh_cookie.py` | 从 Chrome CDP（默认端口 9366）抓 studio.stepfun.ai 的最新 cookie 写入 `cookie.txt`；浏览器没开/没登录时静默跳过（不动现有文件） |
+| `refresh_cookie.py` | 从 Chrome CDP（默认端口 9366）抓 studio.stepfun.ai 的最新 cookie 写入 `cookie.txt`；浏览器未开/未登录时静默跳过（不动现有文件） |
 | 网关内置 watcher | `gateway.py` 启动时监视 `cookie.txt`，变化即热更新（**不用重启网关**） |
-| `com.stepfun.cookie-refresh.plist` | launchd 定时任务：每 300s 跑一次刷新，日志写 `refresh.log` |
+| `com.stepfun.cookie-refresh.plist` | launchd 定时任务：每 60s 跑一次刷新，日志写 `refresh.log` |
 
 ### 安装定时任务
 
@@ -355,7 +374,7 @@ tail -f refresh.log                 # 看定时刷新日志
 | `transcript.py` | messages[] → transcript content 序列化（含工具历史回放） |
 | `tools.py` | 工具转换器：tools[] → 协议指令；模型 JSON → 标准 tool_calls |
 | `refresh_cookie.py` | 从 Chrome CDP 抓最新 cookie 写入 cookie.txt（自动续期用） |
-| `com.stepfun.cookie-refresh.plist` | launchd 定时任务（每 5min 刷新 cookie） |
+| `com.stepfun.cookie-refresh.plist` | launchd 定时任务（每 60s 刷新 cookie） |
 | `config.example.json` | 配置模板 |
 | `cookie.txt` | 凭证（已 gitignore） |
 

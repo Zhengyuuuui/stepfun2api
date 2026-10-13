@@ -105,6 +105,19 @@
   <!-- ======================= 总览 ======================= -->
   <section id="view-overview">
     <div class="panel">
+      <h2>登录 / Cookie（studio.stepfun.ai 海外版）
+        <span class="right"><span id="cdp-pill" class="pill">CDP…</span></span></h2>
+      <p class="muted tiny" style="margin:0 0 10px">
+        网关凭证来自你浏览器登录 studio 的 cookie（access 2h / refresh ~30d）。
+        前提：Chrome 以 <code class="mono">--remote-debugging-port=9366</code> 调试模式运行。
+        登录成功后本页会自动抓取并热更新，无需手动抄 cookie。</p>
+      <div class="row">
+        <div class="fixed"><button onclick="openLogin()">① 打开 Studio 登录页</button></div>
+        <div class="fixed"><button class="ghost" onclick="captureCookie()">② 手动抓取 cookie</button></div>
+        <div id="login-status" class="muted" style="flex:2 1 220px;align-self:center">状态检测中…</div>
+      </div>
+    </div>
+    <div class="panel">
       <h2>运行指标 <span class="right"><span id="uptime" class="pill"></span></span></h2>
       <div class="grid" id="stats"></div>
     </div>
@@ -135,8 +148,10 @@
       <div id="quota" class="muted">加载中…</div>
     </div>
     <div class="panel">
-      <h2>Cookie / Access Token <span class="right"><span id="token-age" class="pill"></span>
-        <button id="btn-refresh" class="small" onclick="refreshCookie()">立即续期</button></span></h2>
+      <h2>Cookie / Access Token <span class="right">
+        <span id="token-warn-pill" class="pill warn" style="display:none">临期预警</span>
+        <span id="token-age" class="pill"></span>
+        <button id="btn-refresh" class="small" onclick="refreshCookie()" title="触发页面 reload 检查/换发 token 并同步 cookie.txt">立即续期</button></span></h2>
       <div class="bar" style="margin-top:0">
         <span class="name tiny muted">剩余寿命</span>
         <div class="meter" id="tokenmeter"><i style="width:0%"></i></div>
@@ -248,17 +263,29 @@ async function tick(){
     // token 条（全局显示在 account 视图，也回填 note）
     const left=tk.left_min, life=tk.life_h||2;
     const pctEl=document.getElementById("tokenpct"), meter=document.getElementById("tokenmeter");
-    if(left==null){ pctEl.textContent="—"; }
+    const warnPill=document.getElementById("token-warn-pill");
+    if(left==null){
+      pctEl.textContent="—";
+      if(warnPill) warnPill.style.display="none";
+    }
     else{
       const p=Math.max(0,Math.min(100,left/(life*60)*100));
       meter.querySelector("i").style.width=p+"%";
       meter.className="meter"+(left<=0?" bad":left<30?" low":"");
       pctEl.textContent=left<=0?("过期"+(-left).toFixed(0)+"m"):left.toFixed(0)+"m";
       document.getElementById("tokennote").innerHTML = left<=0
-        ? '<span style="color:var(--bad)">access token 已过期 —— 点「立即续期」或保持浏览器 stepfun 页开着</span>'
-        : `寿命 ${life.toFixed(1)}h · cookie.txt ${d.cookie_age_s}s 前更新 · 到期前 30min 自动轮换`;
+        ? '<span style="color:var(--bad)">access token 已过期 —— 点「立即续期」或保持浏览器 stepfun 活跃（launchd 每 60s 兜底）</span>'
+        : `寿命 ${life.toFixed(1)}h · cookie.txt ${d.cookie_age_s}s 前更新 · 仅真过期时换发新 token（launchd 每 60s 自动兜底）`;
       document.getElementById("token-age").textContent = left<=0?"expired":("剩 "+left.toFixed(0)+"min");
       document.getElementById("token-age").className="pill "+(left<=0?"bad":left<30?"warn":"ok");
+      if(warnPill){
+        if(left>0 && left<=20){
+          warnPill.style.display="inline-block";
+          warnPill.textContent=`临期 (<${Math.ceil(left)}m)`;
+        } else {
+          warnPill.style.display="none";
+        }
+      }
     }
     // 最近请求
     document.getElementById("recent").innerHTML=(d.recent||[]).map(r=>
@@ -345,21 +372,92 @@ async function tickLogs(){
   }catch(e){ /* 静默，断线由 conn pill 提示 */ }
 }
 
+/* ---------- 登录 / Cookie ---------- */
+let loginPoll = null;
+async function apiPost(url, cls){
+  try{
+    const r=await fetch(url,{method:"POST",headers:{"Authorization":"Bearer "+key}});
+    const d=await r.json().catch(()=>({}));
+    if(!r.ok && !d.error) throw new Error("HTTP "+r.status);
+    return d;
+  }catch(e){ notify(url+" 失败: "+e,"bad"); return null; }
+}
+async function openLogin(){
+  const el=document.getElementById("login-status");
+  el.textContent="正在调试 Chrome 里打开 studio…";
+  const d=await apiPost("/v1/console/open-login");
+  if(!d || !d.ok){ el.innerHTML=`<span style="color:var(--bad)">${d && (d.error||d.stderr) || "打开失败（Chrome 未以调试模式启动？）"}</span>`; return; }
+  el.textContent = (d.already?"已聚焦 studio 标签页":"已打开登录页")+"，请在浏览器完成登录…（登录后自动抓取）";
+  startLoginPoll();
+}
+function startLoginPoll(){
+  if(loginPoll) clearInterval(loginPoll);
+  let n=0;
+  loginPoll=setInterval(async ()=>{
+    n++; if(n>150){ clearInterval(loginPoll); loginPoll=null; return; } // 5min
+    try{
+      const s=await getJSON("/v1/console/login-status");
+      updateCdp(s);
+      if(s.ok && s.logged_in && s.left_min>0){
+        clearInterval(loginPoll); loginPoll=null;
+        const el=document.getElementById("login-status");
+        el.innerHTML=`检测到有效登录（token 剩 ${s.left_min.toFixed(0)}min），自动抓取中…`;
+        await captureCookie(true);
+      }
+    }catch(e){ /* key 错等由 pill 提示 */ }
+  },2000);
+}
+async function captureCookie(auto){
+  const el=document.getElementById("login-status");
+  el.textContent=auto?"抓取中…":"正在从浏览器抓取 cookie…";
+  const d=await apiPost("/v1/console/capture-cookie");
+  if(d && d.ok){
+    el.innerHTML=`<span style="color:var(--ok)">✓ cookie 已抓取并热更新${auto?"（登录闭环完成）":""}，access 剩 ${Math.round(d.token&&d.token.left_min||0)}min</span>`;
+    notify("cookie 已更新","ok"); tick();
+  } else {
+    el.innerHTML=`<span style="color:var(--bad)">抓取失败：${(d&&(d.stderr||d.stdout))||"浏览器可能未登录或无 token"}</span>`;
+  }
+}
+async function updateCdp(s){
+  const p=document.getElementById("cdp-pill");
+  if(!s){ return; }
+  if(!s.cdp){ p.className="pill bad"; p.textContent="CDP 未连接"; }
+  else if(!s.page){ p.className="pill warn"; p.textContent="浏览器无 studio 页"; }
+  else if(!s.logged_in){ p.className="pill warn"; p.textContent="未登录"; }
+  else if(s.left_min<=0){ p.className="pill warn"; p.textContent="token 过期"; }
+  else { p.className="pill ok"; p.textContent="浏览器已登录"; }
+}
+async function tickCdp(){ try{ updateCdp(await getJSON("/v1/console/login-status")); }catch(e){ document.getElementById("cdp-pill").textContent="API 不通"; } }
+
 /* ---------- 续期 ---------- */
 async function refreshCookie(){
-  const b=document.getElementById("btn-refresh"); b.disabled=true; b.textContent="续期中…";
+  const b=document.getElementById("btn-refresh"); b.disabled=true; b.textContent="检查换发中…";
   try{
     const r=await fetch("/v1/console/refresh-cookie",{method:"POST",headers:{"Authorization":"Bearer "+key}});
-    const d=await r.json();
-    if(d.ok && d.token && d.token.left_min>0) notify("续期成功，剩余 "+Math.round(d.token.left_min)+"min","ok");
-    else notify((d.stderr||d.stdout||d.error||"续期失败").slice(-120),"bad");
+    const d=await r.json().catch(()=>({}));
+    if(!r.ok || !d.ok || d.state==="failed"){
+      notify(d.note || (d.stderr||d.error||"同步/换发失败").slice(-100),"bad");
+    } else if(d.state==="rotated"){
+      const left = d.token && d.token.left_min != null ? Math.round(d.token.left_min) : "—";
+      notify(d.note || `SPA 已换发新 token，剩余 ${left}min`,"ok");
+    } else if(d.state==="expired"){
+      notify(d.note || "token 已过期且 SPA 未换发，请在浏览器页面刷新或重新登录","bad");
+    } else if(d.state==="synced"){
+      notify(d.note || "浏览器与 cookie.txt 已同步（当前 token 仍在有效期内，SPA 未换新）","warn");
+    } else {
+      notify(d.note || "操作完成","ok");
+    }
+    if(d.note){
+      const noteEl=document.getElementById("tokennote");
+      if(noteEl && d.state!=="rotated") noteEl.textContent=d.note;
+    }
   }catch(e){ notify("续期失败: "+e,"bad"); }
   b.disabled=false; b.textContent="立即续期";
   tick();
 }
 
 tick(); loadQuota(); setInterval(tick,5000); setInterval(loadQuota,60000);
-setInterval(tickLogs,2000);
+setInterval(tickLogs,2000); tickCdp(); setInterval(tickCdp,20000);
 </script>
 </body>
 </html>
