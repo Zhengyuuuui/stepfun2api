@@ -328,15 +328,17 @@ launchd 每 60 秒 → refresh_cookie.py（CDP 检查/抓最新 cookie → 写 c
 实测 StepFun 海外版 SPA 的换发行为有极其特殊的强约束，切勿盲目"提前续期"：
 1. **无法提前续期**：SPA **仅在服务端返回 401 token-expired 时**，才会使用 refresh 段向上游换发同账号的新 access token（2h）；在 token 仍处于有效期内时，无论如何 reload 页面，SPA 都绝对不会换发新 token。
 2. **伪造过期会换错账号**：如果通过本地修改时间戳等方式伪造 access token 过期（无论保留还是丢弃 refresh 段），都会导致上游签名校验失败。SPA 遭遇非法 token 时会直接清空 cookie 并触发游客重注册，生成一个**无额度、未激活（`activated=false`, `payMode=1`）的全新游客 UID**，导致原账号额度丢失不可用！
-3. **闭环策略**：因此，协议层在有效期内不可能提前续期。网关采用最佳稳妥设计：
-   - **真过期兜底**：launchd 定时任务每 60 秒检查一次，一旦真过期便触发页面 reload 换发新 token 并同步写入 `cookie.txt`。
-   - **保持浏览器活跃**：用户日常保持调试 Chrome 打开 `studio.stepfun.ai` 标签页，SPA 在过期后发请求会自然换发，网关可在 60 秒内无缝跟进热更新。
+3. **闭环策略与零标签页常驻**：
+   - **日常调用完全脱离浏览器**：网关基于 Python `httpx` 直连云端，常态推理请求无需浏览器或标签页介入。
+   - **零标签页凭证同步**：Chrome 只要处于调试模式运行（即使关闭了所有 StepFun 标签页），脚本也能直接通过 CDP `Storage.getCookies` 从底层 Cookie Jar 获取凭证。
+   - **静默后台换发兜底**：当 2 小时 token 真过期需要换签时，若浏览器未打开页面，脚本会自动通过 CDP 创建一次性静默后台标签页（`background=True`），等待 SPA 完成换签后立即自动销毁关闭该标签页，用户完全无感知，**无需长期常驻打开 StepFun 标签页**！
+   - **游客态防污染防护**：若捕获到未激活游客态凭证（`activated=false`），坚决拒绝覆盖已有账号。
 
 ### 组成
 
 | 部件 | 说明 |
 | -- | -- |
-| `refresh_cookie.py` | 从 Chrome CDP（默认端口 9366）抓 studio.stepfun.ai 的最新 cookie 写入 `cookie.txt`；浏览器未开/未登录时静默跳过（不动现有文件） |
+| `refresh_cookie.py` | 从 Chrome CDP（默认端口 9366）读取最新 cookie 写入 `cookie.txt` 并双向同步 `accounts.json`；支持零标签页静默换签与游客态防护 |
 | 网关内置 watcher | `gateway.py` 启动时监视 `cookie.txt`，变化即热更新（**不用重启网关**） |
 | `com.stepfun.cookie-refresh.plist` | launchd 定时任务：每 60s 跑一次刷新，日志写 `refresh.log` |
 
@@ -389,7 +391,7 @@ tail -f refresh.log                 # 看定时刷新日志
 
 - **本质是反代网页版 agent**：走的是 studio.stepfun.ai 前端私有协议，依赖浏览器会话 cookie；
   studio 改版/加签/风控都可能随时打断，非官方 API，无 SLA，请自行评估使用场景与合规风险
-- **自动续期依赖本机 Chrome**：需保持调试模式（CDP 9366）运行且登录 studio.stepfun.ai；refresh token 约 30 天不用也会过期，届时浏览器重登一次即可（见「自动续期」章节）
+- **自动续期依赖本机 Chrome**：需保持 Chrome 以调试模式（CDP 9366）在后台运行；**无需常驻打开 StepFun 标签页**（已实现静默后台换发）；refresh token 约 30 天不用也会过期，届时浏览器重登一次即可（见「自动续期」章节）
 - **transcript 模式**：多轮历史由网关序列化进 content，而非复用会话；超长对话受 `max_tokens`/上下文窗口限制
 - **工具调用是提示词模拟**：非上游原生协议，可靠性依赖模型指令遵循；已用五层加固（末尾协议 + 谎报检测重试 + 拒绝检测重试 + 工具名归一 + 两段式搜索），opencode 真实场景稳定 3/3，但仍非 100% 确定性，仅 `step-5-preview`+thinking 可用，flash 系列易跑偏；工具模式下流式为收集式（块在流末尾一次性发出）
 - **仅实现 chat**：image/tts/asr（`kind` 字段切换）未实现，模型已在 `/v1/models` 外的 config 里可见
