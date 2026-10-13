@@ -33,6 +33,7 @@ from transcript import serialize_messages
 from tools import (build_tool_prompt, parse_tool_calls,
                    detect_fabrication, detect_refusal,
                    CORRECTION, CORRECTION_REFUSAL)
+from pool import AccountPool, parse_token_info
 
 logging.basicConfig(
     level=logging.DEBUG if os.environ.get("DEBUG") else logging.INFO,
@@ -198,16 +199,19 @@ def _read_cookie_file(path: str) -> str:
     return ""
 
 
+base_dir = os.path.dirname(os.path.abspath(__file__))
 CONFIG = load_config()
 if not CONFIG["cookie"]:
     log.warning("未配置 cookie！请用 COOKIE_FILE 或 config.json 提供 studio.stepfun.ai 的 cookie")
+
+POOL = AccountPool(filepath=os.path.join(base_dir, "accounts.json"), default_config=CONFIG)
 
 _client: Optional["StepFunClient"] = None
 _watcher: Optional["asyncio.Task"] = None
 
 
 async def _cookie_watcher():
-    """轮询 cookie.txt，mtime/内容变化时热更新到 client（免重启）。"""
+    """轮询 cookie.txt，mtime/内容变化时热更新到 client 和号池（免重启）。"""
     import asyncio
     path = CONFIG.get("cookie_file") or "cookie.txt"
     if not path or not os.path.exists(path):
@@ -231,6 +235,17 @@ async def _cookie_watcher():
             if cli.update_cookie(new):
                 CONFIG["cookie"] = new
                 log.info("已从 %s 热重载 cookie", path)
+                try:
+                    tinfo = parse_token_info(new)
+                    uid = tinfo.get("uid")
+                    if uid:
+                        existing = POOL.get_account_by_uid(uid)
+                        if existing:
+                            existing["cookie"] = new
+                            POOL.save()
+                            POOL._rebuild_clients()
+                except Exception:
+                    pass
         except asyncio.CancelledError:
             raise
         except Exception as e:
@@ -264,6 +279,9 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 
 def get_client() -> StepFunClient:
     global _client
+    acc, cli = POOL.get_next_client()
+    if cli is not None:
+        return cli
     if _client is None:
         _client = StepFunClient(
             cookie=CONFIG["cookie"], proxy=CONFIG["proxy"],
@@ -425,7 +443,11 @@ async def chat_completions(request: Request):
                  sf_config["thinking"], sf_config["effort"], len(tools) if has_tools else 0,
                  web_search)
 
-    client = get_client()
+    acct, client = POOL.get_next_client()
+    if client is None:
+        client = get_client()
+        acct = None
+    acct_uid = acct["uid"] if acct else None
     completion_id = "chatcmpl-" + uuid.uuid4().hex[:24]
     created = int(time.time())
 
@@ -472,7 +494,7 @@ async def chat_completions(request: Request):
             _metered_stream(
                 _stream_response(client, completion_id, created, model, content, sf_config,
                                  web_search, has_tools, last_role, tool_names),
-                model, has_tools, time.time()),
+                model, has_tools, time.time(), acct_uid),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "Connection": "keep-alive",
                      "X-Accel-Buffering": "no"},
@@ -490,10 +512,13 @@ async def chat_completions(request: Request):
         except Exception:
             err = resp.status_code != 200
         _record_req(model, False, has_tools, usage, (time.time() - t0) * 1000, err)
+        if acct_uid:
+            POOL.record_usage(acct_uid, tokens=int((usage or {}).get("total_tokens") or 0),
+                              latency_ms=(time.time() - t0) * 1000, error=str(err) if err else None)
         return resp
 
 
-async def _metered_stream(gen, model: str, tool_mode: bool, t0: float):
+async def _metered_stream(gen, model: str, tool_mode: bool, t0: float, acct_uid: Optional[str] = None):
     usage = {}
     err = False
     try:
@@ -510,6 +535,9 @@ async def _metered_stream(gen, model: str, tool_mode: bool, t0: float):
             yield piece
     finally:
         _record_req(model, True, tool_mode, usage, (time.time() - t0) * 1000, err)
+        if acct_uid:
+            POOL.record_usage(acct_uid, tokens=int((usage or {}).get("total_tokens") or 0),
+                              latency_ms=(time.time() - t0) * 1000, error=str(err) if err else None)
 
 
 async def _run_stream(client, conversation_id, content, model, sf_config, web_search):
@@ -807,6 +835,10 @@ async def console_overview(request: Request):
             "auto_delete_conversation": CONFIG["auto_delete_conversation"],
             "api_key_configured": bool(CONFIG["api_keys"]),
         },
+        "pool": {
+            "total": len(POOL.accounts),
+            "active": len([a for a in POOL.accounts if a.get("status") == "active"]),
+        },
     })
 
 
@@ -926,9 +958,162 @@ async def console_capture_cookie(request: Request):
         if new:
             get_client().update_cookie(new)
             CONFIG["cookie"] = new
+            try:
+                tinfo = parse_token_info(new)
+                uid = tinfo.get("uid")
+                if uid:
+                    existing = POOL.get_account_by_uid(uid)
+                    if existing:
+                        existing["cookie"] = new
+                        POOL.save()
+                        POOL._rebuild_clients()
+            except Exception:
+                pass
     except Exception:
         pass
     return JSONResponse({"ok": True, "token": _token_status_now(), "stdout": out[-300:]})
+
+
+# ============================================================
+# 号池 (Account Pool) API
+# ============================================================
+@app.get("/v1/console/pool")
+async def console_pool_list(request: Request):
+    err = check_auth(request)
+    if err:
+        return err
+    return JSONResponse({
+        "ok": True,
+        "total": len(POOL.accounts),
+        "active": len([a for a in POOL.accounts if a.get("status") == "active"]),
+        "accounts": POOL.to_public_list(),
+    })
+
+
+@app.post("/v1/console/pool/open-login")
+async def console_pool_open_login(request: Request):
+    """点击「添加账号到号池」：在调试 Chrome 中打开崭新的登录页（清空旧会话，供登录新号）。"""
+    err = check_auth(request)
+    if err:
+        return err
+    rc, out, outerr = await _run_refresh_script("--open-login", "--clean", timeout=15)
+    try:
+        data = json.loads(out or "{}")
+    except Exception:
+        data = {}
+    return JSONResponse({
+        "ok": rc == 0 and data.get("ok", False),
+        "message": "已在调试 Chrome 打开全新的登录页面，请在该页面完成新账号登录...",
+        **data,
+        "stderr": outerr[-300:],
+    })
+
+
+@app.post("/v1/console/pool/capture")
+async def console_pool_capture(request: Request):
+    """新账号在浏览器登录完成后，一键抓取并验身绑入号池。"""
+    err = check_auth(request)
+    if err:
+        return err
+    rc, out, outerr = await _run_refresh_script("--no-rotate")
+    if rc != 0:
+        return JSONResponse({"ok": False, "error": f"抓取失败: {outerr or out}"}, status_code=502)
+    path = CONFIG.get("cookie_file") or "cookie.txt"
+    try:
+        new_cookie = open(path, encoding="utf-8").read().strip()
+        if not new_cookie:
+            return JSONResponse({"ok": False, "error": "抓取到的 cookie 为空"}, status_code=400)
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": f"读取 cookie 失败: {e}"}, status_code=500)
+
+    try:
+        account = await POOL.add_or_update_from_cookie(new_cookie)
+        return JSONResponse({
+            "ok": True,
+            "account": {
+                "uid": account["uid"],
+                "email": account.get("email"),
+                "status": account.get("status"),
+                "free_rate": account.get("free_rate"),
+                "plan_desc": account.get("plan_desc"),
+            },
+            "total": len(POOL.accounts),
+            "accounts": POOL.to_public_list(),
+        })
+    except Exception as e:
+        log.exception("绑入号池失败")
+        return JSONResponse({"ok": False, "error": f"绑入号池失败: {e}"}, status_code=400)
+
+
+@app.post("/v1/console/pool/add")
+async def console_pool_add(request: Request):
+    """手动粘贴 cookie 文本直接导入号池。"""
+    err = check_auth(request)
+    if err:
+        return err
+    try:
+        data = await request.json()
+    except Exception:
+        return JSONResponse({"ok": False, "error": "请求体须为 JSON"}, status_code=400)
+    cookie_str = data.get("cookie", "").strip()
+    name = data.get("name", "").strip()
+    if not cookie_str:
+        return JSONResponse({"ok": False, "error": "cookie 不能为空"}, status_code=400)
+
+    try:
+        account = await POOL.add_or_update_from_cookie(cookie_str, name=name)
+        return JSONResponse({
+            "ok": True,
+            "account": {
+                "uid": account["uid"],
+                "email": account.get("email"),
+                "status": account.get("status"),
+                "free_rate": account.get("free_rate"),
+                "plan_desc": account.get("plan_desc"),
+            },
+            "total": len(POOL.accounts),
+            "accounts": POOL.to_public_list(),
+        })
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": f"导入失败: {e}"}, status_code=400)
+
+
+@app.post("/v1/console/pool/toggle")
+async def console_pool_toggle(request: Request):
+    """启用 / 禁用指定账号。"""
+    err = check_auth(request)
+    if err:
+        return err
+    try:
+        data = await request.json()
+    except Exception:
+        return JSONResponse({"ok": False, "error": "请求体须为 JSON"}, status_code=400)
+    uid = str(data.get("uid") or "").strip()
+    enabled = data.get("enabled")
+    if not uid:
+        return JSONResponse({"ok": False, "error": "uid 不能为空"}, status_code=400)
+    ok = POOL.toggle_account(uid, enabled=enabled)
+    return JSONResponse({"ok": ok, "accounts": POOL.to_public_list()})
+
+
+@app.delete("/v1/console/pool/{uid}")
+async def console_pool_delete(uid: str, request: Request):
+    """从号池中删除指定账号。"""
+    err = check_auth(request)
+    if err:
+        return err
+    ok = POOL.delete_account(uid)
+    return JSONResponse({"ok": ok, "accounts": POOL.to_public_list()})
+
+
+@app.post("/v1/console/pool/refresh-quotas")
+async def console_pool_refresh_quotas(request: Request):
+    """并发刷新号池所有账号的额度。"""
+    err = check_auth(request)
+    if err:
+        return err
+    accounts = await POOL.refresh_all_quotas()
+    return JSONResponse({"ok": True, "accounts": accounts})
 
 
 if __name__ == "__main__":

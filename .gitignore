@@ -1,6 +1,8 @@
 config.json
 cookie.txt
 cookie.txt.bak
+accounts.json
+accounts.json*
 *.bak
 *.log
 __pycache__/

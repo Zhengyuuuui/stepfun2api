@@ -93,6 +93,7 @@
   <h1>stepfun2api</h1>
   <nav id="nav">
     <button data-view="overview" aria-selected="true">总览</button>
+    <button data-view="pool">号池</button>
     <button data-view="account">账号与额度</button>
     <button data-view="convs">会话</button>
     <button data-view="logs">日志</button>
@@ -108,12 +109,13 @@
       <h2>登录 / Cookie（studio.stepfun.ai 海外版）
         <span class="right"><span id="cdp-pill" class="pill">CDP…</span></span></h2>
       <p class="muted tiny" style="margin:0 0 10px">
-        网关凭证来自你浏览器登录 studio 的 cookie（access 2h / refresh ~30d）。
+        网关凭证来自浏览器登录 studio 的 cookie（access 2h / refresh ~30d）。
         前提：Chrome 以 <code class="mono">--remote-debugging-port=9366</code> 调试模式运行。
-        登录成功后本页会自动抓取并热更新，无需手动抄 cookie。</p>
+        登录成功后会自动抓取并热更新。支持<b>多账号绑入号池</b>，自动轮询与故障转移。</p>
       <div class="row">
-        <div class="fixed"><button onclick="openLogin()">① 打开 Studio 登录页</button></div>
-        <div class="fixed"><button class="ghost" onclick="captureCookie()">② 手动抓取 cookie</button></div>
+        <div class="fixed"><button onclick="addAccountToPool()">➕ 添加账号到号池</button></div>
+        <div class="fixed"><button class="ghost" onclick="openLogin()">打开登录页</button></div>
+        <div class="fixed"><button class="ghost" onclick="captureCookie()">抓取当前单号</button></div>
         <div id="login-status" class="muted" style="flex:2 1 220px;align-self:center">状态检测中…</div>
       </div>
     </div>
@@ -136,6 +138,40 @@
       <table>
         <thead><tr><th>时间</th><th>模型</th><th>类型</th><th>耗时</th><th>tokens</th><th>状态</th></tr></thead>
         <tbody id="recent"><tr><td colspan="6" class="muted">加载中…</td></tr></tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ======================= 号池 ======================= -->
+  <section id="view-pool" hidden>
+    <div class="panel">
+      <h2>号池概览 & 账号管理
+        <span class="right">
+          <span id="pool-total-pill" class="pill">共 0 个账号</span>
+          <button class="small" onclick="addAccountToPool()">➕ 添加账号到号池</button>
+          <button class="ghost small" onclick="promptAddCookie()">📋 手动导入 Cookie</button>
+          <button class="ghost small" onclick="loadPool(true)">刷新额度</button>
+        </span>
+      </h2>
+      <p class="muted tiny" style="margin:0 0 12px">
+        号池支持绑定多个 StepFun 账号。网关以<b>轮询（Round-Robin）</b>方式向活跃账号分发请求，
+        聚合多个免费账号额度与速率限制；遇到 429 限流或单号到期时自动静默故障转移（Failover）。
+      </p>
+      <table>
+        <thead>
+          <tr>
+            <th>账号 / 邮箱</th>
+            <th>UID</th>
+            <th>状态</th>
+            <th>免费额度</th>
+            <th>Token 寿命</th>
+            <th>调用统计</th>
+            <th>操作</th>
+          </tr>
+        </thead>
+        <tbody id="pool-tbody">
+          <tr><td colspan="7" class="muted">加载中…</td></tr>
+        </tbody>
       </table>
     </div>
   </section>
@@ -212,13 +248,14 @@ function setConn(ok, text){ const c=document.getElementById("conn");
   c.className="pill "+(ok?"ok":"bad"); c.textContent=text||(ok?"已连接":"断开"); }
 
 /* ---------- 视图切换 ---------- */
-const views=["overview","account","convs","logs"];
+const views=["overview","pool","account","convs","logs"];
 document.getElementById("nav").addEventListener("click", e=>{
   const b=e.target.closest("button"); if(!b) return;
   const v=b.dataset.view;
   views.forEach(x=>{ document.getElementById("view-"+x).hidden=(x!==v); });
   document.querySelectorAll("nav button").forEach(n=>
     n.setAttribute("aria-selected", n.dataset.view===v?"true":"false"));
+  if(v==="pool"){ loadPool(); }
   if(v==="account"){ loadQuota(); }
   if(v==="convs"){ loadConversations(); }
 });
@@ -234,7 +271,8 @@ async function tick(){
     const m = d.metrics, tk = d.token || {};
     document.getElementById("uptime").textContent = "uptime " + fmtUptime(d.uptime_s);
     document.getElementById("stats").innerHTML =
-        stat("请求总数", m.requests_total)
+        stat("号池账号", (d.pool ? `${d.pool.active} / ${d.pool.total}` : "—"), (d.pool && d.pool.active ? "ok" : "warn"))
+      + stat("请求总数", m.requests_total)
       + stat("流式", m.requests_stream)
       + stat("工具模式", m.tool_mode_requests)
       + stat("平均延迟", d.avg_latency_ms+" ms", d.avg_latency_ms>20000?"warn":"")
@@ -429,6 +467,143 @@ async function updateCdp(s){
 }
 async function tickCdp(){ try{ updateCdp(await getJSON("/v1/console/login-status")); }catch(e){ document.getElementById("cdp-pill").textContent="API 不通"; } }
 
+/* ---------- 号池 ---------- */
+let poolLoginPoll = null;
+async function addAccountToPool(){
+  const el = document.getElementById("login-status");
+  el.textContent = "正在清理 Chrome 会话并打开全新 Studio 登录页…";
+  const d = await apiPost("/v1/console/pool/open-login");
+  if(!d || !d.ok){
+    el.innerHTML = `<span style="color:var(--bad)">${d && (d.error||d.stderr) || "打开登录页失败（Chrome 未以调试模式启动？）"}</span>`;
+    return;
+  }
+  el.innerHTML = `已打开全新登录页，<b>请在 Chrome 中登录新账号</b>…（登录完成后自动验身绑入号池）`;
+  startPoolLoginPoll();
+}
+
+function startPoolLoginPoll(){
+  if(poolLoginPoll) clearInterval(poolLoginPoll);
+  let n = 0;
+  poolLoginPoll = setInterval(async ()=>{
+    n++;
+    if(n > 150){ clearInterval(poolLoginPoll); poolLoginPoll = null; return; } // 5min
+    try{
+      const s = await getJSON("/v1/console/login-status");
+      updateCdp(s);
+      if(s.ok && s.logged_in && s.left_min > 0){
+        clearInterval(poolLoginPoll); poolLoginPoll = null;
+        const el = document.getElementById("login-status");
+        el.innerHTML = `检测到新账号已登录（token 剩 ${s.left_min.toFixed(0)}min），正在验身绑入号池…`;
+        await captureToPool();
+      }
+    }catch(e){}
+  }, 2000);
+}
+
+async function captureToPool(){
+  const el = document.getElementById("login-status");
+  el.textContent = "正在向上游验证账号并绑入号池…";
+  const d = await apiPost("/v1/console/pool/capture");
+  if(d && d.ok){
+    const acc = d.account || {};
+    el.innerHTML = `<span style="color:var(--ok)">✓ 账号 <b>${acc.email||acc.uid}</b> 已成功绑入号池！当前号池共 <b>${d.total}</b> 个账号</span>`;
+    notify(`账号 ${acc.email||acc.uid} 绑入号池成功 (共${d.total}个)`, "ok");
+    tick();
+    loadPool();
+  } else {
+    el.innerHTML = `<span style="color:var(--bad)">绑入号池失败：${(d && (d.error||d.stderr)) || "未能获取有效凭证"}</span>`;
+    notify("绑入号池失败", "bad");
+  }
+}
+
+let currentAccounts = [];
+async function loadPool(manual){
+  const tbody = document.getElementById("pool-tbody");
+  if(!tbody) return;
+  try{
+    const d = await getJSON("/v1/console/pool");
+    currentAccounts = d.accounts || [];
+    const pill = document.getElementById("pool-total-pill");
+    if(pill) pill.textContent = `共 ${d.total} 个账号 · 活跃 ${d.active}`;
+    if(!currentAccounts.length){
+      tbody.innerHTML = '<tr><td colspan="7" class="muted">号池为空，点击上方「➕ 添加账号到号池」导入</td></tr>';
+      return;
+    }
+    tbody.innerHTML = currentAccounts.map(a => {
+      const isAct = a.status === "active";
+      const left = a.token_left_min;
+      const leftStr = left != null
+        ? (left <= 0 ? `<span class="pill bad">已过期</span>` : (left < 30 ? `<span class="pill warn">${left}m</span>` : `<span class="pill ok">${left}m</span>`))
+        : "—";
+      const freeRateStr = a.free_rate != null ? `${(a.free_rate * 100).toFixed(1)}%` : "—";
+      const freeMeter = a.free_rate != null
+        ? `<div class="meter ${a.free_rate < 0.2 ? "bad" : a.free_rate < 0.5 ? "low" : ""}"><i style="width:${Math.max(0, Math.min(100, a.free_rate * 100))}%"></i></div>`
+        : "";
+      return `<tr>
+        <td><b>${a.email || "未命名"}</b><div class="muted tiny">${a.name || ""}</div></td>
+        <td class="mono tiny">${a.uid}</td>
+        <td>
+          <button class="small ${isAct ? "ghost" : ""}" onclick="togglePoolAccount('${a.uid}', ${!isAct})">${isAct ? '<span class="pill ok" style="border:none;padding:0">活跃</span>' : '<span class="pill" style="border:none;padding:0">已停用</span>'}</button>
+        </td>
+        <td style="min-width:130px">
+          <div style="display:flex;align-items:center;gap:8px">
+            <div style="flex:1">${freeMeter}</div>
+            <span class="mono tiny">${freeRateStr}</span>
+          </div>
+        </td>
+        <td>${leftStr}</td>
+        <td class="tiny mono">${a.requests_count || 0} reqs<div class="muted">${((a.tokens_count || 0) / 1000).toFixed(1)}k tok</div></td>
+        <td>
+          <button class="ghost small" onclick="refreshPoolQuota('${a.uid}')" title="刷新该账号额度">刷新</button>
+          <button class="ghost small" style="color:var(--bad);border-color:color-mix(in srgb,var(--bad) 35%,transparent)" onclick="deletePoolAccount('${a.uid}')" title="从号池移除">删除</button>
+        </td>
+      </tr>`;
+    }).join("");
+    if(manual) notify("号池数据已刷新", "ok");
+  } catch(e){
+    tbody.innerHTML = `<tr><td colspan="7" style="color:var(--bad)">加载失败: ${e}</td></tr>`;
+  }
+}
+
+async function togglePoolAccount(uid, enable){
+  try{
+    const d = await apiPost("/v1/console/pool/toggle", {uid, enabled: enable});
+    if(d && d.ok){ notify(enable ? "账号已启用" : "账号已停用", "ok"); loadPool(); tick(); }
+  }catch(e){ notify("操作失败: " + e, "bad"); }
+}
+
+async function deletePoolAccount(uid){
+  if(!confirm("确定要将账号 " + uid + " 从号池中移除吗？")) return;
+  try{
+    const r = await fetch("/v1/console/pool/" + uid, {method: "DELETE", headers: {"Authorization": "Bearer " + key}});
+    const d = await r.json().catch(()=>({}));
+    if(d && d.ok){ notify("账号已从号池删除", "ok"); loadPool(); tick(); }
+    else notify("删除失败: " + (d.error || "未知错误"), "bad");
+  }catch(e){ notify("删除失败: " + e, "bad"); }
+}
+
+async function refreshPoolQuota(uid){
+  notify("正在向上游刷新额度…");
+  try{
+    await apiPost("/v1/console/pool/refresh-quotas");
+    notify("额度刷新成功", "ok");
+    loadPool();
+  }catch(e){ notify("刷新失败: " + e, "bad"); }
+}
+
+function promptAddCookie(){
+  const cookie = prompt("请粘贴完整 Cookie 字符串（包含 Oasis-Token=...）：");
+  if(!cookie || !cookie.trim()) return;
+  apiPost("/v1/console/pool/add", {cookie: cookie.trim()}).then(d=>{
+    if(d && d.ok){
+      notify(`账号 ${d.account.email || d.account.uid} 已成功导入号池！`, "ok");
+      loadPool(); tick();
+    } else {
+      notify("导入失败: " + (d && d.error || "未知错误"), "bad");
+    }
+  });
+}
+
 /* ---------- 续期 ---------- */
 async function refreshCookie(){
   const b=document.getElementById("btn-refresh"); b.disabled=true; b.textContent="检查换发中…";
@@ -456,7 +631,7 @@ async function refreshCookie(){
   tick();
 }
 
-tick(); loadQuota(); setInterval(tick,5000); setInterval(loadQuota,60000);
+tick(); loadPool(); loadQuota(); setInterval(tick,5000); setInterval(loadQuota,60000);
 setInterval(tickLogs,2000); tickCdp(); setInterval(tickCdp,20000);
 </script>
 </body>

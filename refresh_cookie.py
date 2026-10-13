@@ -132,9 +132,9 @@ def status_mode(port: int):
     print(json.dumps(out, ensure_ascii=False))
 
 
-def open_login_mode(port: int, url: str = "https://studio.stepfun.ai/"):
-    """在调试 Chrome 里打开/聚焦 studio 页面，供用户登录。"""
-    out = {"ok": False, "opened": False, "already": False, "error": None}
+def open_login_mode(port: int, url: str = "https://studio.stepfun.ai/", clean: bool = False):
+    """在调试 Chrome 里打开/聚焦 studio 页面，供用户登录。clean=True 时清除旧会话以便登录新号。"""
+    out = {"ok": False, "opened": False, "already": False, "cleaned": clean, "error": None}
     try:
         data = cdp_targets(port)
     except Exception as e:
@@ -145,7 +145,18 @@ def open_login_mode(port: int, url: str = "https://studio.stepfun.ai/"):
     try:
         if pages:
             ws = websocket.create_connection(pages[0]["webSocketDebuggerUrl"], timeout=10)
-            ws.send(json.dumps({"id": 1, "method": "Page.navigate", "params": {"url": url}}))
+            if clean:
+                # 清除旧 cookie 与 storage，呈现干净的登录界面
+                try:
+                    ws.send(json.dumps({"id": 1, "method": "Network.clearBrowserCookies"}))
+                    ws.recv()
+                    ws.send(json.dumps({"id": 2, "method": "Storage.clearDataForOrigin",
+                                       "params": {"origin": "https://studio.stepfun.ai",
+                                                  "storageTypes": "cookies,local_storage"}}))
+                    ws.recv()
+                except Exception:
+                    pass
+            ws.send(json.dumps({"id": 3, "method": "Page.navigate", "params": {"url": url}}))
             ws.recv()
             ws.close()
             out.update(ok=True, already=True)
@@ -154,8 +165,9 @@ def open_login_mode(port: int, url: str = "https://studio.stepfun.ai/"):
             ws = websocket.create_connection(v["webSocketDebuggerUrl"], timeout=10)
             ws.send(json.dumps({"id": 1, "method": "Target.createTarget", "params": {"url": url}}))
             r = json.loads(ws.recv())
+            target_id = r.get("result", {}).get("targetId")
             ws.close()
-            out.update(ok=True, opened=True, targetId=r.get("result", {}).get("targetId"))
+            out.update(ok=True, opened=True, targetId=target_id)
     except Exception as e:
         out["error"] = str(e)
     print(json.dumps(out, ensure_ascii=False))
@@ -171,13 +183,14 @@ def main():
                     help="无条件触发页面 reload 轮换（Console「立即续期」按钮用）")
     ap.add_argument("--status", action="store_true", help="输出 JSON 状态（CDP/登录/token），不写文件")
     ap.add_argument("--open-login", action="store_true", help="在调试 Chrome 打开/聚焦 studio 登录页")
+    ap.add_argument("--clean", action="store_true", help="与 --open-login 一起使用：清除当前会话以便登录新号入池")
     args = ap.parse_args()
 
     if args.status:
         status_mode(args.port)
         return
     if args.open_login:
-        open_login_mode(args.port)
+        open_login_mode(args.port, clean=args.clean)
         return
 
     try:

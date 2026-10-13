@@ -129,12 +129,13 @@ PORT=8391 API_KEYS=sk-a,sk-b python gateway.py
 ## Web Console
 
 启动后浏览器打开 `http://127.0.0.1:8390/` 即内置控制台（单文件 `static/index.html`，无外部依赖，
-明暗双主题，布局参考同作者 minimax2api console）。四个视图：
+明暗双主题，布局参考同作者 minimax2api console）。五个视图：
 
-- **总览**：**登录/Cookie 面板**（打开 Studio 登录页 → 登录 → 自动抓 cookie 热更新的闭环）、
-  请求数/流式/工具模式/平均延迟/错误/token 用量；模型分布；**工具协议健康度**
+- **总览**：**登录/Cookie 面板**（一键打开登录页 / 一键添加账号到号池 → 自动抓取并热更新闭环）、
+  号池账号/请求数/流式/工具模式/平均延迟/错误/token 用量；模型分布；**工具协议健康度**
   （一次通过率 + 谎报拦截/拒绝拦截/纠正重试/两段式搜索计数）；最近请求表
-- **账号与额度**：上游实时额度（免费额度/5小时/周窗口进度条 + 重置时间 + credit 明细）、
+- **号池**：**多账号池集中管理**（多账号列表、UID/邮箱、启用/停用开关、免费额度与窗口进度条、Token 剩余寿命、请求统计、一键添加账号到号池、手动粘贴导入、批量刷新额度、删除账号；请求自动轮询与 429 故障转移）
+- **账号与额度**：当前默认账号上游实时额度（免费额度/5小时/周窗口进度条 + 重置时间 + credit 明细）、
   access token 剩余寿命条 + **一键续期按钮**（等效手动跑 refresh_cookie.py）、账号信息（UID/Email/订阅）
 - **会话**：上游账号会话列表实时查看（验证网关用完即删、零残留）
 - **日志**：网关日志环形缓冲实时增量拉取
@@ -143,20 +144,24 @@ Console API（均需 `Authorization: Bearer <网关api_key>`，与 `/v1/*` 同�
 
 | 端点 | 说明 |
 | -- | -- |
-| `GET /v1/console/overview` | 指标快照 + token 状态 + 配置摘要 |
-| `GET /v1/console/quota` | 上游额度/订阅计划/账号信息（`QueryStudioRateLimit` 等实测端点） |
+| `GET /v1/console/overview` | 指标快照 + token 状态 + 号池状态 + 配置摘要 |
+| `GET /v1/console/pool` | 获取号池全部账号列表与配额信息 |
+| `POST /v1/console/pool/open-login` | 在调试 Chrome 打开全新干净的登录页（清除旧会话，供登录新号） |
+| `POST /v1/console/pool/capture` | 抓取调试 Chrome 当前登录账号并验身绑入号池 |
+| `POST /v1/console/pool/add` | 手动提交 Cookie 字符串导入号池（`{"cookie": "..."}`） |
+| `POST /v1/console/pool/toggle` | 启用/停用指定账号（`{"uid": "...", "enabled": bool}`） |
+| `DELETE /v1/console/pool/{uid}` | 从号池中删除指定账号 |
+| `POST /v1/console/pool/refresh-quotas` | 并发刷新号池所有账号的实时额度 |
+| `GET /v1/console/quota` | 当前账号上游额度/订阅计划/账号信息 |
 | `GET /v1/console/logs?since=<id>` | 日志增量（环形缓冲 300 条） |
 | `GET /v1/console/conversations` | 上游会话列表 |
 | `GET /v1/console/login-status` | 调试 Chrome 状态（CDP/studio页/登录态/token 剩余，JSON） |
 | `POST /v1/console/open-login` | 在调试 Chrome 里打开/聚焦 studio 登录页 |
-| `POST /v1/console/capture-cookie` | 从浏览器抓取 cookie 覆盖 cookie.txt 并热更新（登录闭环用） |
+| `POST /v1/console/capture-cookie` | 从浏览器抓取 cookie 覆盖 cookie.txt 并热更新（单账号用） |
 | `POST /v1/console/refresh-cookie` | **强制**轮换续期（reload 页面换发新 token 后覆盖 cookie.txt） |
 
-> **登录即拿 cookie**：总览页「打开 Studio 登录页」→ 浏览器里正常登录 → 控制台每 2s 轮询，
-> 检测到有效 token 后自动抓取 cookie.txt 并热更新网关，全程不用打开 DevTools 抄 cookie。
+> **多账号绑入号池闭环**：在「号池」或「总览」点击「➕ 添加账号到号池」→ Chrome 自动打开全新登录页 → 正常登录新号 → 控制台每 2s 轮询检测，自动抓取并请求 StepFun 官方接口验身，成功追加进 `accounts.json`。网关自动对活跃账号进行 Round-Robin 轮询调度分摊限流。
 > 前提：Chrome 以 `--remote-debugging-port=9366` 启动（refresh token 约 30 天有效，期间可随时重抓）。
-> 注意：上游 SPA 只在 token 过期/临期时才换发新 access token，「立即续期」对有效期内
-> 的 token 会如实提示"已替换 cookie 但 SPA 未换发"。
 
 ---
 
@@ -372,11 +377,13 @@ tail -f refresh.log                 # 看定时刷新日志
 | `static/index.html` | Web Console（总览/额度/会话/日志，单文件无依赖） |
 | `stepfun_client.py` | 上游协议客户端（RPC + SSE 解析 + 鉴权头 + `update_cookie` 热更新） |
 | `transcript.py` | messages[] → transcript content 序列化（含工具历史回放） |
+| `pool.py` | 号池管理器（多账号存储/轮询调度/故障转移/配额刷新） |
+| `accounts.json` | 号池持久化存储（已 gitignore） |
 | `tools.py` | 工具转换器：tools[] → 协议指令；模型 JSON → 标准 tool_calls |
 | `refresh_cookie.py` | 从 Chrome CDP 抓最新 cookie 写入 cookie.txt（自动续期用） |
 | `com.stepfun.cookie-refresh.plist` | launchd 定时任务（每 60s 刷新 cookie） |
 | `config.example.json` | 配置模板 |
-| `cookie.txt` | 凭证（已 gitignore） |
+| `cookie.txt` | 默认单号凭证（已 gitignore） |
 
 ## 已知限制 / 待办
 
